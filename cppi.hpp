@@ -1,4 +1,7 @@
 #pragma once
+#include "external/json/single_include/nlohmann/json.hpp"
+#include "helpers.hpp"
+#include "errors.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -200,23 +203,48 @@ public:
         return *this;
     }
     
-    Response& json(const std::string& jsonStr) {
+    Response& json(nlohmann::json jsonObj) {
         setContentType("application/json");
-        body = jsonStr;
+        body = jsonObj.dump();
         return *this;
     }
     
-    Response& html(const std::string& htmlStr) {
-        setContentType("text/html");
-        body = htmlStr;
-        return *this;
-    }
+
+    Response& html(const std::string& htmlStr, bool is_path = true) {
+	setContentType("text/html");
+
+	if (!is_path) {
+	    body = htmlStr;
+	    return *this;
+	}
+
+	try {
+	    body = cppi::helpers::readFileToString(htmlStr);
+	} catch (const cppi::errors::FileReadError& e) {
+	    throw cppi::errors::InternalServerError("Failed to read HTML file at: " + e.filename);
+	}
+	return *this;
+}
+
     
-    Response& text(const std::string& textStr) {
-        setContentType("text/plain");
-        body = textStr;
-        return *this;
+
+    Response& text(const std::string& textStr, bool is_path = false) {
+	setContentType("text/plain");
+
+	if (!is_path) {
+	    body = textStr;
+	    return *this;
+	}
+
+	try {
+	    body = cppi::helpers::readFileToString(textStr);
+	} catch (const cppi::errors::FileReadError& e) {
+	    throw cppi::errors::InternalServerError("Failed to read text file at: " + e.filename);
+	}
+
+	return *this;
     }
+
     
     Response& send(const std::string& data) {
         body = data;
