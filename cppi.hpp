@@ -3,6 +3,10 @@
 #include "helpers.hpp"
 #include "errors.hpp"
 
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <atomic>
 #include <string>
 #include <unordered_map>
 #include <functional>
@@ -453,21 +457,99 @@ public:
     }
 };
 
-// Server class
+class ThreadPool {
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    mutable std::mutex queueMutex;
+    std::condition_variable condition;
+    std::atomic<bool> stop{false};
+    
+public:
+    ThreadPool(size_t numThreads = std::thread::hardware_concurrency()) {
+        for(size_t i = 0; i < numThreads; ++i) {
+            workers.emplace_back([this] {
+                while(true) {
+                    std::function<void()> task;
+                    
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        condition.wait(lock, [this] { return stop || !tasks.empty(); });
+                        
+                        if(stop && tasks.empty()) {
+                            return;
+                        }
+                        
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+                    
+                    task();
+                }
+            });
+        }
+    }
+    
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            stop = true;
+        }
+        
+        condition.notify_all();
+        
+        for(std::thread& worker : workers) {
+            worker.join();
+        }
+    }
+    
+    template<class F>
+    void enqueue(F&& f) {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            if(stop) {
+                throw std::runtime_error("enqueue on stopped ThreadPool");
+            }
+            tasks.emplace(std::forward<F>(f));
+        }
+        condition.notify_one();
+    }
+    
+    size_t pendingTasks() const {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        return tasks.size();
+    }
+};
+
 class Server {
 private:
     int port;
     int serverSocket;
-    bool running;
+    std::atomic<bool> running{false};
     Router router;
-    std::vector<std::thread> workers;
+    std::unique_ptr<ThreadPool> threadPool;
+    std::thread acceptorThread;
+    
+    // Connection management
+    std::atomic<size_t> activeConnections{0};
+    size_t maxConnections;
+    
+    // Performance monitoring
+    std::atomic<size_t> totalRequests{0};
+    std::chrono::steady_clock::time_point startTime;
     
 #ifdef _WIN32
     WSADATA wsaData;
 #endif
     
 public:
-    Server(int p = 8080) : port(p), serverSocket(-1), running(false) {
+    Server(int p = 8080, size_t maxConn = 1000, size_t threadCount = 0) 
+        : port(p), serverSocket(-1), maxConnections(maxConn) {
+        
+        // Use hardware concurrency if not specified
+        size_t threads = threadCount > 0 ? threadCount : std::thread::hardware_concurrency();
+        threadPool = std::make_unique<ThreadPool>(threads);
+        
 #ifdef _WIN32
         WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
@@ -491,9 +573,18 @@ public:
             return false;
         }
         
-        // Set socket options
+        // Set socket options for better performance
         int opt = 1;
         setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+        
+        // Set non-blocking mode for better responsiveness
+#ifdef _WIN32
+        u_long mode = 1;
+        ioctlsocket(serverSocket, FIONBIO, &mode);
+#else
+        int flags = fcntl(serverSocket, F_GETFL, 0);
+        fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK);
+#endif
         
         sockaddr_in serverAddr{};
         serverAddr.sin_family = AF_INET;
@@ -505,33 +596,25 @@ public:
             return false;
         }
         
-        if(listen(serverSocket, 10) < 0) {
+        if(listen(serverSocket, SOMAXCONN) < 0) {
             std::cerr << "Failed to listen on socket" << std::endl;
             return false;
         }
         
         running = true;
-        std::cout << "Server started on port " << port << std::endl;
+        startTime = std::chrono::steady_clock::now();
+        std::cout << "Server started on port " << port << " with " 
+                  << threadPool->pendingTasks() << " worker threads" << std::endl;
         
-        // Accept connections
-        while(running) {
-            sockaddr_in clientAddr{};
-            socklen_t clientLen = sizeof(clientAddr);
-            int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientLen);
-            
-            if(clientSocket >= 0) {
-                // Handle client in a separate thread
-                workers.emplace_back([this, clientSocket]() {
-                    handleClient(clientSocket);
-                });
-            }
-        }
+        // Start acceptor thread
+        acceptorThread = std::thread([this] { acceptConnections(); });
         
         return true;
     }
     
     void stop() {
         running = false;
+        
         if(serverSocket >= 0) {
 #ifdef _WIN32
             closesocket(serverSocket);
@@ -541,18 +624,88 @@ public:
             serverSocket = -1;
         }
         
-        // Wait for all worker threads to finish
-        for(auto& worker : workers) {
-            if(worker.joinable()) {
-                worker.join();
-            }
+        if(acceptorThread.joinable()) {
+            acceptorThread.join();
         }
-        workers.clear();
+        
+        // ThreadPool destructor will handle cleanup
+        threadPool.reset();
+        
+        std::cout << "Server stopped. Total requests handled: " << totalRequests << std::endl;
+    }
+    
+    // Performance monitoring
+    void printStats() const {
+        auto now = std::chrono::steady_clock::now();
+        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
+        
+        std::cout << "=== Server Stats ===" << std::endl;
+        std::cout << "Uptime: " << uptime << " seconds" << std::endl;
+        std::cout << "Active connections: " << activeConnections.load() << std::endl;
+        std::cout << "Total requests: " << totalRequests.load() << std::endl;
+        std::cout << "Pending tasks: " << threadPool->pendingTasks() << std::endl;
+        std::cout << "Requests/second: " << (uptime > 0 ? totalRequests.load() / uptime : 0) << std::endl;
     }
     
 private:
+    void acceptConnections() {
+        fd_set readSet;
+        struct timeval timeout;
+        
+        while(running) {
+            FD_ZERO(&readSet);
+            FD_SET(serverSocket, &readSet);
+            
+            timeout.tv_sec = 1;  // 1 second timeout
+            timeout.tv_usec = 0;
+            
+            int activity = select(serverSocket + 1, &readSet, nullptr, nullptr, &timeout);
+            
+            if(activity < 0 && errno != EINTR) {
+                break;
+            }
+            
+            if(activity > 0 && FD_ISSET(serverSocket, &readSet)) {
+                sockaddr_in clientAddr{};
+                socklen_t clientLen = sizeof(clientAddr);
+                int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientLen);
+                
+                if(clientSocket >= 0) {
+                    // Check connection limits
+                    if(activeConnections.load() >= maxConnections) {
+                        std::string response = "HTTP/1.1 503 Service Unavailable\r\n"
+                                             "Content-Length: 21\r\n"
+                                             "Connection: close\r\n\r\n"
+                                             "Server overloaded";
+                        send(clientSocket, response.c_str(), response.length(), 0);
+#ifdef _WIN32
+                        closesocket(clientSocket);
+#else
+                        close(clientSocket);
+#endif
+                        continue;
+                    }
+                    
+                    // Enqueue client handling task
+                    activeConnections++;
+                    threadPool->enqueue([this, clientSocket] {
+                        handleClient(clientSocket);
+                        activeConnections--;
+                    });
+                }
+            }
+        }
+    }
+    
     void handleClient(int clientSocket) {
-        char buffer[4096];
+        // Set socket timeout
+        struct timeval tv;
+        tv.tv_sec = 30;  // 30 second timeout
+        tv.tv_usec = 0;
+        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        setsockopt(clientSocket, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+        
+        char buffer[8192];  // Larger buffer for better performance
         int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
         
         if(bytesRead > 0) {
@@ -563,15 +716,25 @@ private:
                 Request req = HttpParser::parse(rawRequest);
                 Response res;
                 
+                // Add server headers
+                res.setHeader("Server", "cppi/1.1.0")
+                   .setHeader("Connection", "close");
+                
                 if(!router.handle(req, res)) {
                     res.setStatus(Status::NOT_FOUND).text("Not Found");
                 }
                 
                 std::string response = res.toString();
                 send(clientSocket, response.c_str(), response.length(), 0);
+                
+                totalRequests++;
+                
             } catch(const std::exception& e) {
                 Response errorRes;
-                errorRes.setStatus(Status::INTERNAL_SERVER_ERROR).text("Internal Server Error");
+                errorRes.setStatus(Status::INTERNAL_SERVER_ERROR)
+                       .setHeader("Server", "cppi/1.1.0")
+                       .setHeader("Connection", "close")
+                       .text("Internal Server Error");
                 std::string response = errorRes.toString();
                 send(clientSocket, response.c_str(), response.length(), 0);
             }
