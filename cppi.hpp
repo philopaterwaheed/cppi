@@ -18,6 +18,8 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <iomanip>
+#include <variant>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -29,6 +31,8 @@
     #include <arpa/inet.h>
     #include <unistd.h>
     #include <fcntl.h>
+    #include <netdb.h>
+    #include <errno.h>
 #endif
 
 namespace cppi{
@@ -38,6 +42,7 @@ class Request;
 class Response;
 class Router;
 class Server;
+class Client;
 
 
 // Request class
@@ -108,6 +113,15 @@ public:
         return *this;
     }
     
+    std::string getHeader(const std::string& name) const {
+        auto it = headers.find(name);
+        return it != headers.end() ? it->second : "";
+    }
+    
+    bool hasHeader(const std::string& name) const {
+        return headers.find(name) != headers.end();
+    }
+    
     Response& json(nlohmann::json jsonObj) {
         setContentType("application/json");
         body = jsonObj.dump();
@@ -124,9 +138,9 @@ public:
 	}
 
 	try {
-	    body = cppi::helpers::readFileToString(htmlStr);
-	} catch (const cppi::errors::FileReadError& e) {
-	    throw cppi::errors::InternalServerError("Failed to read HTML file at: " + e.filename);
+	    body = helpers::readFileToString(htmlStr);
+	} catch (const errors::FileReadError& e) {
+	    throw errors::InternalServerError("Failed to read HTML file at: " + e.filename);
 	}
 	return *this;
 }
@@ -142,9 +156,9 @@ public:
 	}
 
 	try {
-	    body = cppi::helpers::readFileToString(textStr);
-	} catch (const cppi::errors::FileReadError& e) {
-	    throw cppi::errors::InternalServerError("Failed to read text file at: " + e.filename);
+	    body = helpers::readFileToString(textStr);
+	} catch (const errors::FileReadError& e) {
+	    throw errors::InternalServerError("Failed to read text file at: " + e.filename);
 	}
 
 	return *this;
@@ -158,7 +172,7 @@ public:
     
     std::string toString() const {
         std::stringstream ss;
-        ss << "HTTP/1.1 " << cppi::utils::statusToString(status) << "\r\n";
+        ss << "HTTP/1.1 " << utils::statusToString(status) << "\r\n";
         
         // Add content-length header
         auto headersCopy = headers;
@@ -578,7 +592,7 @@ private:
                                              "Content-Length: 21\r\n"
                                              "Connection: close\r\n\r\n"
                                              "Server overloaded";
-                        send(clientSocket, response.c_str(), response.length(), 0);
+                        ::send(clientSocket, response.c_str(), response.length(), 0);
 #ifdef _WIN32
                         closesocket(clientSocket);
 #else
@@ -626,7 +640,7 @@ private:
                 }
                 
                 std::string response = res.toString();
-                send(clientSocket, response.c_str(), response.length(), 0);
+                ::send(clientSocket, response.c_str(), response.length(), 0);
                 
                 totalRequests++;
                 
@@ -637,7 +651,7 @@ private:
                        .setHeader("Connection", "close")
                        .text("Internal Server Error");
                 std::string response = errorRes.toString();
-                send(clientSocket, response.c_str(), response.length(), 0);
+                ::send(clientSocket, response.c_str(), response.length(), 0);
             }
         }
         
@@ -715,5 +729,428 @@ inline Middleware logger() {
         return true; // Continue to next middleware/route
     };
 }
+
+// HTTP Client class
+class Client {
+private:
+    int timeoutSeconds;
+    std::unordered_map<std::string, std::string> defaultHeaders;
+    
+public:
+    Client(int timeout = 30) : timeoutSeconds(timeout) {
+        defaultHeaders["User-Agent"] = "cppi-client/1.0.0";
+        defaultHeaders["Connection"] = "close";
+    }
+    
+    // Set default headers for all requests
+    Client& setHeader(const std::string& name, const std::string& value) {
+        defaultHeaders[name] = value;
+        return *this;
+    }
+    
+    Client& setTimeout(int seconds) {
+        timeoutSeconds = seconds;
+        return *this;
+    }
+    
+    // Unified HTTP method with host/port/path
+    Response send(Method method, const std::string& host, int port, const std::string& path,
+                  const types::BodyVariant& body = std::monostate{},
+                  const std::unordered_map<std::string, std::string>& headers = {}) {
+        auto allHeaders = headers;
+        std::string bodyStr = utils::processBody(body, allHeaders);
+        return request(method, host, port, path, bodyStr, allHeaders);
+    }
+    
+    // Unified HTTP method with full URL
+    Response sendUrl(Method method, const std::string& url,
+                     const types::BodyVariant& body = std::monostate{},
+                     const std::unordered_map<std::string, std::string>& headers = {}) {
+        auto allHeaders = headers;
+        std::string bodyStr = utils::processBody(body, allHeaders);
+        return requestUrl(method, url, bodyStr, allHeaders);
+    }
+        
+    Response get(const std::string& url,
+                 const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::GET, url, std::monostate{}, headers);
+    }
+
+    // GET method - overloaded for host/port/path and URL
+    Response get(const std::string& host, int port, const std::string& path,
+                 const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::GET, host, port, path, std::monostate{}, headers);
+    }
+
+    Response post(const std::string& url,
+                  const types::BodyVariant& body = std::monostate{},
+                  const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::POST, url, body, headers);
+    }
+
+    // POST method - overloaded for host/port/path and URL
+    Response post(const std::string& host, int port, const std::string& path,
+                  const types::BodyVariant& body = std::monostate{},
+                  const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::POST, host, port, path, body, headers);
+    }
+    
+    Response put(const std::string& url,
+                 const types::BodyVariant& body = std::monostate{},
+                 const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::PUT, url, body, headers);
+    }
+    
+    // PUT method - overloaded for host/port/path and URL
+    Response put(const std::string& host, int port, const std::string& path,
+                 const types::BodyVariant& body = std::monostate{},
+                 const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::PUT, host, port, path, body, headers);
+    }
+    
+    
+    Response patch(const std::string& url,
+                   const types::BodyVariant& body = std::monostate{},
+                   const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::PATCH, url, body, headers);
+    }
+
+    // PATCH method - overloaded for host/port/path and URL
+    Response patch(const std::string& host, int port, const std::string& path,
+                   const types::BodyVariant& body = std::monostate{},
+                   const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::PATCH, host, port, path, body, headers);
+    }
+    
+    Response del(const std::string& url,
+                 const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::DELETE, url, std::monostate{}, headers);
+    }
+    
+    // DELETE method - overloaded for host/port/path and URL
+    Response del(const std::string& host, int port, const std::string& path,
+                 const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::DELETE, host, port, path, std::monostate{}, headers);
+    }
+    
+    
+    Response head(const std::string& url,
+                  const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::HEAD, url, std::monostate{}, headers);
+    }
+
+    // HEAD method - overloaded for host/port/path and URL
+    Response head(const std::string& host, int port, const std::string& path,
+                  const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::HEAD, host, port, path, std::monostate{}, headers);
+    }
+    
+    
+    Response options(const std::string& url,
+                     const std::unordered_map<std::string, std::string>& headers = {}) {
+        return sendUrl(Method::OPTIONS, url, std::monostate{}, headers);
+    }
+
+    // OPTIONS method - overloaded for host/port/path and URL
+    Response options(const std::string& host, int port, const std::string& path,
+                     const std::unordered_map<std::string, std::string>& headers = {}) {
+        return send(Method::OPTIONS, host, port, path, std::monostate{}, headers);
+    }
+
+    bool downloadFile(const std::string& url, const std::string& localFilePath,
+                      const std::unordered_map<std::string, std::string>& headers = {}) {
+        auto response = get(url, headers);
+        if (response.status == Status::OK) {
+            std::ofstream file(localFilePath, std::ios::binary);
+            if (file.is_open()) {
+                file.write(response.body.c_str(), response.body.length());
+                file.close();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Overloaded for host/port/path and URL
+    bool downloadFile(const std::string& host, int port, const std::string& path, 
+                      const std::string& localFilePath, 
+                      const std::unordered_map<std::string, std::string>& headers = {}) {
+        auto response = get(host, port, path, headers);
+        if (response.status == Status::OK) {
+            std::ofstream file(localFilePath, std::ios::binary);
+            if (file.is_open()) {
+                file.write(response.body.c_str(), response.body.length());
+                file.close();
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    bool ping(const std::string& url) {
+        try {
+            auto response = head(url);
+            return response.status == Status::OK || 
+                   response.status == Status::NOT_FOUND; // Server is responding
+        } catch (const std::exception& e) {
+            return false;
+        }
+    }
+    
+    // Overloaded for host/port/path and URL
+    bool ping(const std::string& host, int port, const std::string& path = "/") {
+        try {
+            auto response = head(host, port, path);
+            return response.status == Status::OK || 
+                   response.status == Status::NOT_FOUND; // Server is responding
+        } catch (const std::exception& e) {
+            return false;
+        }
+    }
+    
+
+private:
+    // Request method
+    Response request(Method method, const std::string& host, int port, const std::string& path, 
+                     const std::string& body, const std::unordered_map<std::string, std::string>& headers) {
+        Response response;
+        int clientSocket = -1;
+        
+        try {
+            // Create socket
+            clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+            if (clientSocket < 0) {
+                throw std::runtime_error("Failed to create socket");
+            }
+            
+            // Set socket timeout
+            struct timeval tv;
+            tv.tv_sec = timeoutSeconds;
+            tv.tv_usec = 0;
+            setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+            setsockopt(clientSocket, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+            
+            // Resolve host and connect
+            sockaddr_in serverAddr{};
+            serverAddr.sin_family = AF_INET;
+            serverAddr.sin_port = htons(port);
+            
+            // Simple IP address detection (for basic usage)
+            if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) <= 0) {
+                // Try hostname resolution
+                struct hostent* hostEntry = gethostbyname(host.c_str());
+                if (hostEntry == nullptr) {
+                    throw std::runtime_error("Failed to resolve hostname: " + host);
+                }
+                serverAddr.sin_addr = *((struct in_addr*)hostEntry->h_addr);
+            }
+            
+            if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+                throw std::runtime_error("Failed to connect to server");
+            }
+            
+            // Build HTTP request
+            std::stringstream requestStream;
+            requestStream << utils::methodToString(method) << " " << path << " HTTP/1.1\r\n";
+            requestStream << "Host: " << host;
+            if (port != 80 && port != 443) {
+                requestStream << ":" << port;
+            }
+            requestStream << "\r\n";
+            
+            // Merge default headers with request headers
+            auto allHeaders = defaultHeaders;
+            for (const auto& header : headers) {
+                allHeaders[header.first] = header.second;
+            }
+            
+            // Add Content-Length for requests with body
+            if (!body.empty()) {
+                allHeaders["Content-Length"] = std::to_string(body.length());
+            }
+            
+            // Add headers to request
+            for (const auto& header : allHeaders) {
+                requestStream << header.first << ": " << header.second << "\r\n";
+            }
+            
+            requestStream << "\r\n";
+            
+            // Add body if present
+            if (!body.empty()) {
+                requestStream << body;
+            }
+            
+            std::string requestStr = requestStream.str();
+            
+            // Send request
+            if (::send(clientSocket, requestStr.c_str(), requestStr.length(), 0) < 0) {
+                throw std::runtime_error("Failed to send request");
+            }
+            
+            // Receive response 
+            std::string responseStr;
+            char buffer[4096];
+            int bytesReceived;
+            
+            while ((bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0)) > 0) {
+                buffer[bytesReceived] = '\0';
+                responseStr += buffer;
+                
+                if (responseStr.find("\r\n\r\n") != std::string::npos) {
+                    size_t headerEnd = responseStr.find("\r\n\r\n");
+                    std::string headers = responseStr.substr(0, headerEnd);
+                    
+                    if (headers.find("Content-Length:") != std::string::npos) {
+                        std::regex contentLengthRegex(R"(Content-Length:\s*(\d+))");
+                        std::smatch match;
+                        if (std::regex_search(headers, match, contentLengthRegex)) {
+                            int contentLength = std::stoi(match[1].str());
+                            int currentBodyLength = responseStr.length() - (headerEnd + 4);
+                            if (currentBodyLength >= contentLength) {
+                                break;
+                            }
+                        }
+                    } else if (headers.find("Transfer-Encoding: chunked") == std::string::npos) {
+                        break;
+                    }
+                }
+            }
+            
+            if (bytesReceived < 0) {
+                throw std::runtime_error("Failed to receive response");
+            }
+            
+            response = parseResponse(responseStr);
+            
+        } catch (const std::exception& e) {
+            response.setStatus(Status::INTERNAL_SERVER_ERROR)
+                   .setHeader("Error", e.what())
+                   .text("Request failed: " + std::string(e.what()));
+        }
+        
+        // Clean up
+        if (clientSocket >= 0) {
+#ifdef _WIN32
+            closesocket(clientSocket);
+#else
+            close(clientSocket);
+#endif
+        }
+        
+        return response;
+    }
+    
+    // Helper method to parse URLs
+    struct UrlComponents {
+        std::string host;
+        int port;
+        std::string path;
+        bool isHttps;
+    };
+    
+    UrlComponents parseUrl(const std::string& url) {
+        UrlComponents components;
+        components.port = 80;
+        components.path = "/";
+        components.isHttps = false;
+        
+        std::string remaining = url;
+        
+        // Check for protocol
+        if (remaining.substr(0, 8) == "https://") {
+            components.isHttps = true;
+            components.port = 443;
+            remaining = remaining.substr(8);
+        } else if (remaining.substr(0, 7) == "http://") {
+            remaining = remaining.substr(7);
+        }
+        
+        // Find path separator
+        size_t pathPos = remaining.find('/');
+        std::string hostPart;
+        if (pathPos != std::string::npos) {
+            hostPart = remaining.substr(0, pathPos);
+            components.path = remaining.substr(pathPos);
+        } else {
+            hostPart = remaining;
+        }
+        
+        // Check for port in host part
+        size_t colonPos = hostPart.find(':');
+        if (colonPos != std::string::npos) {
+            components.host = hostPart.substr(0, colonPos);
+            components.port = std::stoi(hostPart.substr(colonPos + 1));
+        } else {
+            components.host = hostPart;
+        }
+        
+        return components;
+    }
+    
+    // Request method with full URL
+    Response requestUrl(Method method, const std::string& url, const std::string& body,
+                        const std::unordered_map<std::string, std::string>& headers) {
+        UrlComponents components = parseUrl(url);
+        
+        // Note: This implementation doesn't handle HTTPS/SSL
+        if (components.isHttps) {
+            Response response;
+            response.setStatus(Status::INTERNAL_SERVER_ERROR)
+                   .text("HTTPS not supported in this implementation");
+            return response;
+        }
+        
+        return request(method, components.host, components.port, components.path, body, headers);
+    }
+    
+    Response parseResponse(const std::string& responseStr) {
+        Response response;
+        std::stringstream ss(responseStr);
+        std::string line;
+        
+        // Parse status line
+        if (std::getline(ss, line)) {
+            line.erase(line.find_last_not_of("\r\n") + 1);
+            std::stringstream lineStream(line);
+            std::string version, statusCode, statusText;
+            
+            lineStream >> version >> statusCode;
+            std::getline(lineStream, statusText);
+            
+            // Convert status code to Status enum
+            response.status = utils::codeToStatus(statusCode);
+        }
+        
+        // Parse headers
+        while (std::getline(ss, line) && line != "\r") {
+            line.erase(line.find_last_not_of("\r\n") + 1);
+            size_t colonPos = line.find(':');
+            if (colonPos != std::string::npos) {
+                std::string name = line.substr(0, colonPos);
+                std::string value = line.substr(colonPos + 1);
+                
+                // Trim whitespace
+                name.erase(0, name.find_first_not_of(" \t"));
+                name.erase(name.find_last_not_of(" \t") + 1);
+                value.erase(0, value.find_first_not_of(" \t"));
+                value.erase(value.find_last_not_of(" \t") + 1);
+                
+                response.headers[name] = value;
+            }
+        }
+        
+        // Parse body
+        std::string bodyLine;
+        while (std::getline(ss, bodyLine)) {
+            response.body += bodyLine + "\n";
+        }
+        if (!response.body.empty()) {
+            response.body.pop_back(); // Remove last newline
+        }
+        
+        return response;
+    }
+};
 
 }//cppi namespace

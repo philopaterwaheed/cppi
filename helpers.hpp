@@ -16,7 +16,7 @@ inline std::string readFileToString(const std::string &filename) {
     file.read(&content[0], size);
     return content;
   } catch (const std::exception &e) {
-    throw cppi::errors::FileReadError(filename);
+    throw errors::FileReadError(filename);
   }
 }
 
