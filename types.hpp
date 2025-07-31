@@ -1,4 +1,7 @@
 #pragma once
+#include <variant>
+#include <string>
+#include "external/json/single_include/nlohmann/json.hpp"
 namespace cppi::types {
 // HTTP Methods
 enum class Method { GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS };
@@ -9,6 +12,8 @@ enum class Status {
   CREATED = 201,
   ACCEPTED = 202,
   NO_CONTENT = 204,
+  MOVED_PERMANENTLY = 301,
+  FOUND = 302,
   BAD_REQUEST = 400,
   UNAUTHORIZED = 401,
   FORBIDDEN = 403,
@@ -20,4 +25,11 @@ enum class Status {
   SERVICE_UNAVAILABLE = 503
 };
 
+// Body variant type for different body types
+using BodyVariant = std::variant<
+    std::monostate,                                           // No body
+    std::string,                                              // String body
+    nlohmann::json,                                           // JSON body
+    std::unordered_map<std::string, std::string>              // Form data
+>;
 } // namespace cppi::types
