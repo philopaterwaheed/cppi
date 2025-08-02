@@ -2,7 +2,13 @@
 #include <string>
 #include <unordered_map>
 #include <sstream>
+#include <functional>
 #pragma once
+
+namespace cppi::helpers {
+    class StreamReader;
+}
+
 using Method = cppi::types::Method;
 using Status = cppi::types::Status;
 namespace cppi::utils {
@@ -193,7 +199,47 @@ std::string processBody(const types::BodyVariant& body, std::unordered_map<std::
             }
             return result;
         }
+        else if constexpr (std::is_same_v<T, std::shared_ptr<helpers::StreamReader>>) {
+            // For streaming bodies, we'll handle them separately
+            // This function is only for non-streaming cases
+            return "";
+        }
     }, body);
+}
+
+// Check if body is streaming
+bool isStreamingBody(const types::BodyVariant& body) {
+    return std::holds_alternative<std::shared_ptr<helpers::StreamReader>>(body);
+}
+
+// Get stream reader from body variant
+std::shared_ptr<helpers::StreamReader> getStreamReader(const types::BodyVariant& body) {
+    if (auto* reader = std::get_if<std::shared_ptr<helpers::StreamReader>>(&body)) {
+        return *reader;
+    }
+    return nullptr;
+}
+
+// Process streaming body for HTTP transmission
+void processStreamingBody(const types::BodyVariant& body, 
+                         std::unordered_map<std::string, std::string>& headers,
+                         std::function<void(const char*, size_t)> writer) {
+    if (auto reader = getStreamReader(body)) {
+        size_t totalSize = reader->totalSize();
+        if (totalSize > 0) {
+            headers["Content-Length"] = std::to_string(totalSize);
+        } else {
+            headers["Transfer-Encoding"] = "chunked";
+        }
+        
+        char buffer[helpers::STREAM_BUFFER_SIZE];
+        while (reader->hasMore()) {
+            size_t bytesRead = reader->read(buffer, sizeof(buffer));
+            if (bytesRead > 0) {
+                writer(buffer, bytesRead);
+            }
+        }
+    }
 }
 
 } // namespace cppi::utils
