@@ -34,6 +34,33 @@ CPPI is a modern, header-only C++ HTTP server and client library designed for si
 - **Custom headers** and query parameters
 - **Form data** and multipart support
 
+## **Zero-Configuration Getting Started**
+
+CPPI is designed for maximum simplicity. No complex configuration, no user loops, no thread management:
+
+```cpp
+#include "cppi.hpp"
+using namespace cppi;
+
+int main() {
+    Server server(8080);
+    
+    server.route()
+        .get("/", [](const Request& req, Response& res) {
+            res.text("Hello, World!");
+        });
+    
+    server.run();  // That's it! Runs until Ctrl+C
+    return 0;
+}
+```
+
+**Key Benefits:**
+- **No user loops required** - `server.run()` handles everything
+- **Automatic signal handling** - Graceful shutdown with Ctrl+C  
+- **Zero configuration** - Works out of the box
+- **Production ready** - Built-in thread pooling and connection management
+
 ## Installation
 
 ### Quick Start (Header-Only)
@@ -105,7 +132,8 @@ int main() {
             res.json({{"received", data}, {"status", "success"}});
         });
     
-    server.start();
+    // Start server and run until Ctrl+C
+    server.run();
     return 0;
 }
 ```
@@ -150,10 +178,36 @@ Server(int port = 8080, size_t maxConnections = 1000, size_t threadCount = 0)
 
 | Method | Description |
 |--------|-------------|
-| `start()` | Start the server (blocking) |
+| `run()` | Start server and block until stopped (simplest usage) |
+| `runAsync()` | Start server in non-blocking mode |
 | `stop()` | Stop the server gracefully |
+| `isRunning()` | Check if server is currently running |
+| `waitForStop()` | Wait for server to stop (use with runAsync) |
 | `route()` | Get router for adding routes |
 | `printStats()` | Display server performance statistics |
+
+#### Usage Patterns
+
+**Simple Blocking Server** (Recommended for most cases):
+```cpp
+Server server(8080);
+server.route().get("/", handler);
+server.run();  // Blocks until Ctrl+C
+```
+
+**Non-blocking Server** (For custom monitoring/control):
+```cpp
+Server server(8080);
+server.route().get("/", handler);
+server.runAsync();  // Returns immediately
+
+while (server.isRunning()) {
+    // Custom monitoring logic
+    server.printStats();
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+}
+server.waitForStop();
+```
 
 ### Router Class
 

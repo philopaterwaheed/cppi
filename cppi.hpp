@@ -20,6 +20,7 @@
 #include <chrono>
 #include <iomanip>
 #include <variant>
+#include <csignal>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -740,7 +741,108 @@ public:
         return router;
     }
     
-    bool start() {
+    // Run server in blocking mode
+    bool run() {
+        if (!startListening()) {
+            return false;
+        }
+        
+        // Setup signal handling for graceful shutdown
+        setupSignalHandling();
+        
+        std::cout << "Server running on http://localhost:" << port << std::endl;
+        std::cout << "Press Ctrl+C to stop the server" << std::endl;
+        
+        // Block until server is stopped
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        return true;
+    }
+    
+    // Run server in non-blocking mode
+    bool runAsync() {
+        if (!startListening()) {
+            return false;
+        }
+        
+        setupSignalHandling();
+        std::cout << "Server started in async mode on http://localhost:" << port << std::endl;
+        return true;
+    }
+    
+    // Check if server is running
+    bool isRunning() const {
+        return running.load();
+    }
+    
+    // Wait for server to stop
+    void waitForStop() {
+        if (acceptorThread.joinable()) {
+            acceptorThread.join();
+        }
+    }
+    
+    void stop() {
+        running = false;
+        
+        if(serverSocket >= 0) {
+#ifdef _WIN32
+            closesocket(serverSocket);
+#else
+            close(serverSocket);
+#endif
+            serverSocket = -1;
+        }
+        
+        if(acceptorThread.joinable()) {
+            acceptorThread.join();
+        }
+        
+        // ThreadPool destructor will handle cleanup
+        threadPool.reset();
+        
+        std::cout << "Server stopped. Total requests handled: " << totalRequests << std::endl;
+    }
+    
+    // Performance monitoring
+    void printStats() const {
+        auto now = std::chrono::steady_clock::now();
+        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
+        
+        std::cout << "=== Server Stats ===" << std::endl;
+        std::cout << "Uptime: " << uptime << " seconds" << std::endl;
+        std::cout << "Active connections: " << activeConnections.load() << std::endl;
+        std::cout << "Total requests: " << totalRequests.load() << std::endl;
+        std::cout << "Pending tasks: " << threadPool->pendingTasks() << std::endl;
+        std::cout << "Requests/second: " << (uptime > 0 ? totalRequests.load() / uptime : 0) << std::endl;
+    }
+    
+private:
+    // Static instance for signal handling
+    static inline Server* currentInstance = nullptr;
+    
+    // Signal handler for graceful shutdown
+    static void signalHandler(int signal) {
+        if (currentInstance) {
+            std::cout << "\nReceived signal " << signal << ". Shutting down gracefully..." << std::endl;
+            currentInstance->stop();
+        }
+    }
+    
+    // Setup signal handling for graceful shutdown
+    void setupSignalHandling() {
+        currentInstance = this;
+        std::signal(SIGINT, signalHandler);   // Ctrl+C
+        std::signal(SIGTERM, signalHandler);  // Termination signal
+#ifndef _WIN32
+        std::signal(SIGPIPE, SIG_IGN);        // Ignore broken pipe signals
+#endif
+    }
+    
+    // Private method to start listening (used by run() and runAsync())
+    bool startListening() {
         serverSocket = socket(AF_INET, SOCK_STREAM, 0);
         if(serverSocket < 0) {
             std::cerr << "Failed to create socket" << std::endl;
@@ -786,42 +888,6 @@ public:
         return true;
     }
     
-    void stop() {
-        running = false;
-        
-        if(serverSocket >= 0) {
-#ifdef _WIN32
-            closesocket(serverSocket);
-#else
-            close(serverSocket);
-#endif
-            serverSocket = -1;
-        }
-        
-        if(acceptorThread.joinable()) {
-            acceptorThread.join();
-        }
-        
-        // ThreadPool destructor will handle cleanup
-        threadPool.reset();
-        
-        std::cout << "Server stopped. Total requests handled: " << totalRequests << std::endl;
-    }
-    
-    // Performance monitoring
-    void printStats() const {
-        auto now = std::chrono::steady_clock::now();
-        auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
-        
-        std::cout << "=== Server Stats ===" << std::endl;
-        std::cout << "Uptime: " << uptime << " seconds" << std::endl;
-        std::cout << "Active connections: " << activeConnections.load() << std::endl;
-        std::cout << "Total requests: " << totalRequests.load() << std::endl;
-        std::cout << "Pending tasks: " << threadPool->pendingTasks() << std::endl;
-        std::cout << "Requests/second: " << (uptime > 0 ? totalRequests.load() / uptime : 0) << std::endl;
-    }
-    
-private:
     void acceptConnections() {
         fd_set readSet;
         struct timeval timeout;
