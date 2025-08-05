@@ -77,7 +77,7 @@ git clone https://github.com/philopaterwaheed/cppi.git
 git submodule update --init --depth 1
 ```
 
-> 💡 **Why shallow submodules?** Using `--shallow-submodules` ensures nlohmann/json is cloned with depth 1, reducing download time and disk space usage from ~50MB to ~2MB.
+> **Why shallow submodules?** Using `--shallow-submodules` ensures nlohmann/json is cloned with depth 1, reducing download time and disk space usage from ~50MB to ~2MB.
 
 2. **Include in your project:**
 ```cpp

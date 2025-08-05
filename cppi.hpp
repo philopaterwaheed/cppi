@@ -34,6 +34,10 @@
     #include <fcntl.h>
     #include <netdb.h>
     #include <errno.h>
+    #include <poll.h>
+    #ifdef __linux__
+        #include <sys/epoll.h>
+    #endif
 #endif
 
 namespace cppi{
@@ -889,10 +893,19 @@ private:
     }
     
     void acceptConnections() {
+#ifdef _WIN32
+        // Windows: Use select() with bounds checking
         fd_set readSet;
         struct timeval timeout;
         
         while(running) {
+            // Check if serverSocket exceeds FD_SETSIZE limit
+            if(serverSocket >= FD_SETSIZE) {
+                std::cerr << "Error: Server socket FD (" << serverSocket 
+                         << ") exceeds FD_SETSIZE (" << FD_SETSIZE << ")" << std::endl;
+                break;
+            }
+            
             FD_ZERO(&readSet);
             FD_SET(serverSocket, &readSet);
             
@@ -901,11 +914,56 @@ private:
             
             int activity = select(serverSocket + 1, &readSet, nullptr, nullptr, &timeout);
             
-            if(activity < 0 && errno != EINTR) {
+            if(activity < 0 && WSAGetLastError() != WSAEINTR) {
                 break;
             }
             
             if(activity > 0 && FD_ISSET(serverSocket, &readSet)) {
+#elif defined(__linux__)
+        // Linux: Use epoll() for best performance with large numbers of connections
+        int epollFd = epoll_create1(EPOLL_CLOEXEC);
+        if(epollFd < 0) {
+            std::cerr << "Failed to create epoll fd" << std::endl;
+            return;
+        }
+        
+        struct epoll_event event;
+        event.events = EPOLLIN;
+        event.data.fd = serverSocket;
+        
+        if(epoll_ctl(epollFd, EPOLL_CTL_ADD, serverSocket, &event) < 0) {
+            std::cerr << "Failed to add server socket to epoll" << std::endl;
+            close(epollFd);
+            return;
+        }
+        
+        struct epoll_event events[1];
+        
+        while(running) {
+            // Wait for events with 1 second timeout
+            int activity = epoll_wait(epollFd, events, 1, 1000);  // 1000ms = 1 second
+            
+            if(activity < 0 && errno != EINTR) {
+                break;
+            }
+            
+            if(activity > 0 && events[0].data.fd == serverSocket && (events[0].events & EPOLLIN)) {
+#else
+        // Other Unix systems: Use poll() to avoid FD_SETSIZE limitations
+        struct pollfd pfd;
+        pfd.fd = serverSocket;
+        pfd.events = POLLIN;
+        
+        while(running) {
+            // Poll with 1 second timeout
+            int activity = poll(&pfd, 1, 1000);  // 1000ms = 1 second
+            
+            if(activity < 0 && errno != EINTR) {
+                break;
+            }
+            
+            if(activity > 0 && (pfd.revents & POLLIN)) {
+#endif
                 sockaddr_in clientAddr{};
                 socklen_t clientLen = sizeof(clientAddr);
                 int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientLen);
@@ -935,6 +993,11 @@ private:
                 }
             }
         }
+        
+#ifdef __linux__
+        // Clean up epoll file descriptor
+        close(epollFd);
+#endif
     }
     
     void handleClient(int clientSocket) {
