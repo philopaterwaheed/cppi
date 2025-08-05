@@ -270,12 +270,14 @@ int main() {
                         res.json({{"echo", data}, {"received", true}});
                     });
                 
-                std::thread serverThread([&server]() {
-                    server.start();
-                });
+                // Start server in async mode
+                if (!server.runAsync()) {
+                    results.fail("Server-Client integration", "Failed to start server");
+                    return 1;
+                }
                 
                 // Give server time to start
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 
                 // Test with client
                 Client client;
@@ -293,9 +295,6 @@ int main() {
                 
                 // Stop server
                 server.stop();
-                if (serverThread.joinable()) {
-                    serverThread.join();
-                }
                 
                 if (getSuccess && postSuccess) {
                     results.pass("Server-Client integration");

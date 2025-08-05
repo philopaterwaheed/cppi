@@ -92,7 +92,7 @@ int main() {
         std::cout << "Starting server on http://localhost:8080" << std::endl;
         std::cout << "Press Ctrl+C to stop the server" << std::endl;
         
-        if (!server.start()) {
+        if (!server.runAsync()) {
             std::cerr << "Failed to start server" << std::endl;
             return 1;
         }

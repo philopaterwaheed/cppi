@@ -141,7 +141,7 @@ int main() {
             }
         });
     
-    server.start();
+    server.run();
     return 0;
 }
 ```
@@ -176,7 +176,7 @@ int main() {
             }
         });
     
-    server.start();
+    server.run();
     return 0;
 }
 ```
@@ -200,7 +200,7 @@ int main() {
                .send(response.body);
         });
     
-    server.start();
+    server.run();
     return 0;
 }
 ```

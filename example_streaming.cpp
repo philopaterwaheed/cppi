@@ -70,7 +70,7 @@ int main() {
         std::cout << "  GET /stream/large - Large data streaming" << std::endl;
         std::cout << "  GET /download/filename - File download (place files in public/)" << std::endl;
         
-        if (!server.start()) {
+        if (!server.runAsync()) {
             std::cerr << "Failed to start server" << std::endl;
             return 1;
         }
